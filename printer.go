@@ -6,6 +6,7 @@
 package printer
 
 import (
+	"fmt"
 	"strings"
 	"syscall"
 	"time"
@@ -79,6 +80,9 @@ const (
 	PRINTER_ENUM_CONNECTIONS = 4
 
 	PRINTER_DRIVER_XPS = 0x00000002
+
+	// Job control commands
+	JOB_CONTROL_DELETE = 0x00000005
 )
 
 const (
@@ -102,6 +106,7 @@ const (
 //sys	GetDefaultPrinter(buf *uint16, bufN *uint32) (err error) = winspool.GetDefaultPrinterW
 //sys	ClosePrinter(h syscall.Handle) (err error) = winspool.ClosePrinter
 //sys	OpenPrinter(name *uint16, h *syscall.Handle, defaults uintptr) (err error) = winspool.OpenPrinterW
+//sys	SetJob(h syscall.Handle, jobId uint32, level uint32, pJob *byte, command uint32) (err error) = winspool.SetJobW
 //sys	StartDocPrinter(h syscall.Handle, level uint32, docinfo *DOC_INFO_1) (err error) = winspool.StartDocPrinterW
 //sys	EndDocPrinter(h syscall.Handle) (err error) = winspool.EndDocPrinter
 //sys	WritePrinter(h syscall.Handle, buf *byte, bufN uint32, written *uint32) (err error) = winspool.WritePrinter
@@ -110,6 +115,7 @@ const (
 //sys	EnumPrinters(flags uint32, name *uint16, level uint32, buf *byte, bufN uint32, needed *uint32, returned *uint32) (err error) = winspool.EnumPrintersW
 //sys	GetPrinterDriver(h syscall.Handle, env *uint16, level uint32, di *byte, n uint32, needed *uint32) (err error) = winspool.GetPrinterDriverW
 //sys	EnumJobs(h syscall.Handle, firstJob uint32, noJobs uint32, level uint32, buf *byte, bufN uint32, bytesNeeded *uint32, jobsReturned *uint32) (err error) = winspool.EnumJobsW
+//sys	GetJob(h syscall.Handle, jobId uint32, level uint32, pJob *byte, cbBuf uint32, pcbNeeded *uint32) (err error) = winspool.GetJobW
 
 func Default() (string, error) {
 	b := make([]uint16, 3)
@@ -300,6 +306,168 @@ func (p *Printer) Jobs() ([]JobInfo, error) {
 		pjs = append(pjs, pji)
 	}
 	return pjs, nil
+}
+
+// GetJobByID retrieves information about a specific print job by its ID.
+func (p *Printer) GetJobByID(jobId uint32) (*JobInfo, error) {
+	var bytesNeeded uint32
+	buf := make([]byte, 1)
+
+	// First call to get required buffer size
+	err := GetJob(p.h, jobId, 1, &buf[0], uint32(len(buf)), &bytesNeeded)
+	if err != nil {
+		if err != syscall.ERROR_INSUFFICIENT_BUFFER {
+			return nil, fmt.Errorf("failed to get job info for ID %d: %v", jobId, err)
+		}
+	}
+
+	// Allocate buffer with the required size
+	buf = make([]byte, bytesNeeded)
+	err = GetJob(p.h, jobId, 1, &buf[0], uint32(len(buf)), &bytesNeeded)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job info for ID %d: %v", jobId, err)
+	}
+
+	// Convert the Windows data structure to Go JobInfo
+	ji := (*JOB_INFO_1)(unsafe.Pointer(&buf[0]))
+	pji := &JobInfo{
+		JobID:        ji.JobID,
+		StatusCode:   ji.StatusCode,
+		Priority:     ji.Priority,
+		Position:     ji.Position,
+		TotalPages:   ji.TotalPages,
+		PagesPrinted: ji.PagesPrinted,
+	}
+
+	if ji.MachineName != nil {
+		pji.UserMachineName = windows.UTF16PtrToString(ji.MachineName)
+	}
+	if ji.UserName != nil {
+		pji.UserName = windows.UTF16PtrToString(ji.UserName)
+	}
+	if ji.Document != nil {
+		pji.DocumentName = windows.UTF16PtrToString(ji.Document)
+	}
+	if ji.DataType != nil {
+		pji.DataType = windows.UTF16PtrToString(ji.DataType)
+	}
+	if ji.Status != nil {
+		pji.Status = windows.UTF16PtrToString(ji.Status)
+	}
+
+	// Generate status string from StatusCode if status is empty
+	if strings.TrimSpace(pji.Status) == "" {
+		if pji.StatusCode == 0 {
+			pji.Status += "Queue Paused, "
+		}
+		if pji.StatusCode&JOB_STATUS_PRINTING != 0 {
+			pji.Status += "Printing, "
+		}
+		if pji.StatusCode&JOB_STATUS_PAUSED != 0 {
+			pji.Status += "Paused, "
+		}
+		if pji.StatusCode&JOB_STATUS_ERROR != 0 {
+			pji.Status += "Error, "
+		}
+		if pji.StatusCode&JOB_STATUS_DELETING != 0 {
+			pji.Status += "Deleting, "
+		}
+		if pji.StatusCode&JOB_STATUS_SPOOLING != 0 {
+			pji.Status += "Spooling, "
+		}
+		if pji.StatusCode&JOB_STATUS_OFFLINE != 0 {
+			pji.Status += "Printer Offline, "
+		}
+		if pji.StatusCode&JOB_STATUS_PAPEROUT != 0 {
+			pji.Status += "Out of Paper, "
+		}
+		if pji.StatusCode&JOB_STATUS_PRINTED != 0 {
+			pji.Status += "Printed, "
+		}
+		if pji.StatusCode&JOB_STATUS_DELETED != 0 {
+			pji.Status += "Deleted, "
+		}
+		if pji.StatusCode&JOB_STATUS_BLOCKED_DEVQ != 0 {
+			pji.Status += "Driver Error, "
+		}
+		if pji.StatusCode&JOB_STATUS_USER_INTERVENTION != 0 {
+			pji.Status += "User Action Required, "
+		}
+		if pji.StatusCode&JOB_STATUS_RESTART != 0 {
+			pji.Status += "Restarted, "
+		}
+		if pji.StatusCode&JOB_STATUS_COMPLETE != 0 {
+			pji.Status += "Sent to Printer, "
+		}
+		if pji.StatusCode&JOB_STATUS_RETAINED != 0 {
+			pji.Status += "Retained, "
+		}
+		if pji.StatusCode&JOB_STATUS_RENDERING_LOCALLY != 0 {
+			pji.Status += "Rendering on Client, "
+		}
+		pji.Status = strings.TrimRight(pji.Status, ", ")
+	}
+
+	// Convert submission time
+	pji.Submitted = time.Date(
+		int(ji.Submitted.Year),
+		time.Month(int(ji.Submitted.Month)),
+		int(ji.Submitted.Day),
+		int(ji.Submitted.Hour),
+		int(ji.Submitted.Minute),
+		int(ji.Submitted.Second),
+		int(1000*ji.Submitted.Milliseconds),
+		time.Local,
+	).UTC()
+
+	return pji, nil
+}
+
+// ClearJobByID deletes a specific print job by its ID using SetJob.
+func (p *Printer) ClearJobByID(jobId uint32) error {
+	err := SetJob(p.h, jobId, 0, nil, JOB_CONTROL_DELETE)
+	if err != nil {
+		return fmt.Errorf("failed to delete job with ID %d: %v", jobId, err)
+	}
+	return nil
+}
+
+// ClearAllJobs deletes all print jobs by deleting them individually using SetJob.
+func (p *Printer) ClearAllJobs() error {
+	// Get all current jobs
+	jobs, err := p.Jobs()
+	if err != nil {
+		return fmt.Errorf("failed to list jobs: %v", err)
+	}
+
+	if len(jobs) == 0 {
+		return nil // No jobs to delete
+	}
+
+	var errors []string
+	successCount := 0
+
+	// Delete each job individually
+	for _, job := range jobs {
+		err := SetJob(p.h, job.JobID, 0, nil, JOB_CONTROL_DELETE)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("JobID %d: %v", job.JobID, err))
+		} else {
+			successCount++
+		}
+	}
+
+	// Return result
+	if successCount == len(jobs) {
+		return nil // All jobs deleted successfully
+	}
+
+	if successCount > 0 {
+		return fmt.Errorf("partial success: deleted %d of %d jobs. Errors: %v",
+			successCount, len(jobs), strings.Join(errors, "; "))
+	}
+
+	return fmt.Errorf("failed to delete any jobs. Errors: %v", strings.Join(errors, "; "))
 }
 
 // DriverInfo returns information about printer p driver.
